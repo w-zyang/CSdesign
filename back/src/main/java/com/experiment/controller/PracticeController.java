@@ -67,6 +67,13 @@ public class PracticeController {
     // 提交练习答案（使用DTO）
     @PostMapping("/submit")
     public Result submitPractice(@RequestBody PracticeAnswerDTO practiceAnswerDTO) {
+        System.out.println("========================================");
+        System.out.println("📝 收到练习提交请求");
+        System.out.println("practiceId: " + practiceAnswerDTO.getPracticeId());
+        System.out.println("studentId: " + practiceAnswerDTO.getStudentId());
+        System.out.println("answers数量: " + (practiceAnswerDTO.getAnswers() != null ? practiceAnswerDTO.getAnswers().size() : 0));
+        System.out.println("========================================");
+        
         try {
             // 转换DTO为Service需要的格式
             List<Map<String, Object>> answers = new java.util.ArrayList<>();
@@ -77,6 +84,8 @@ public class PracticeController {
                 answer.put("questionType", item.getQuestionType());
                 answer.put("selectedOptions", item.getSelectedOptions());
                 answers.add(answer);
+                
+                System.out.println("题目ID: " + item.getQuestionId() + ", 答案: " + item.getAnswer() + ", 类型: " + item.getQuestionType());
             }
             
             Map<String, Object> result = practiceService.submitPractice(
@@ -84,8 +93,12 @@ public class PracticeController {
                 practiceAnswerDTO.getStudentId(), 
                 answers
             );
+            
+            System.out.println("✅ 练习提交成功，返回结果: " + result);
             return Result.success("提交练习成功", result);
         } catch (Exception e) {
+            System.err.println("❌ 练习提交失败: " + e.getMessage());
+            e.printStackTrace();
             return Result.error(e.getMessage());
         }
     }

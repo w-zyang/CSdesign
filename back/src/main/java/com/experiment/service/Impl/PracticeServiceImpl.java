@@ -8,13 +8,20 @@ import java.util.Map;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.experiment.constant.PracticeConstants;
 import com.experiment.exception.PracticeException;
 import com.experiment.mapper.PracticeMapper;
 import com.experiment.mapper.StudentPracticeMapper;
+import com.experiment.mapper.StudentExamMapper;
+import com.experiment.mapper.StudentAnswerMapper;
+import com.experiment.mapper.QuestionMapper;
 import com.experiment.pojo.Practice;
 import com.experiment.pojo.StudentPractice;
+import com.experiment.pojo.StudentExam;
+import com.experiment.pojo.StudentAnswer;
+import com.experiment.pojo.Question;
 import com.experiment.result.PageResult;
 import com.experiment.service.PracticeService;
 
@@ -26,6 +33,15 @@ public class PracticeServiceImpl implements PracticeService {
     
     @Autowired
     private StudentPracticeMapper studentPracticeMapper;
+    
+    @Autowired
+    private StudentExamMapper studentExamMapper;
+    
+    @Autowired
+    private StudentAnswerMapper studentAnswerMapper;
+    
+    @Autowired
+    private QuestionMapper questionMapper;
     
     @Override
     public List<Map<String, Object>> getPracticeTypes() {
@@ -146,16 +162,35 @@ public class PracticeServiceImpl implements PracticeService {
     }
     
     @Override
+    @Transactional
     public Map<String, Object> startPractice(Long practiceId, Long studentId) {
-        // 检查练习是否存在
+        System.out.println("📝 开始练习: practiceId=" + practiceId + ", studentId=" + studentId);
+        
+        // 检查Practice是否存在，如果不存在则创建（用于AI生成的练习）
         Practice practice = practiceMapper.selectById(practiceId);
         if (practice == null) {
-            throw new PracticeException(PracticeConstants.ERROR_PRACTICE_NOT_FOUND);
+            System.out.println("⚠️ Practice不存在，创建临时记录");
+            practice = new Practice();
+            practice.setTitle("AI智能练习");
+            practice.setDescription("AI生成的个性化练习");
+            practice.setType("ai_practice");
+            practice.setDifficulty("medium");
+            practice.setDuration(30);
+            practice.setQuestionCount(5);
+            practice.setStatus("active");
+            practice.setCreateTime(LocalDateTime.now());
+            practice.setUpdateTime(LocalDateTime.now());
+            
+            // 插入Practice记录（让数据库自动生成ID）
+            practiceMapper.insert(practice);
+            practiceId = practice.getId(); // 使用数据库生成的ID
+            System.out.println("✅ Practice记录创建成功，ID=" + practiceId);
         }
         
         // 检查是否已经开始练习
         StudentPractice existingPractice = studentPracticeMapper.selectByStudentAndPractice(studentId, practiceId);
         if (existingPractice != null && PracticeConstants.STUDENT_STATUS_IN_PROGRESS.equals(existingPractice.getStatus())) {
+            System.out.println("⚠️ 练习已经在进行中");
             throw new PracticeException(PracticeConstants.ERROR_PRACTICE_ALREADY_STARTED);
         }
         
@@ -170,6 +205,7 @@ public class PracticeServiceImpl implements PracticeService {
         studentPractice.setUpdateTime(LocalDateTime.now());
         
         studentPracticeMapper.insert(studentPractice);
+        System.out.println("✅ StudentPractice记录创建成功");
         
         Map<String, Object> result = new HashMap<>();
         result.put("practiceId", practiceId);
@@ -182,6 +218,7 @@ public class PracticeServiceImpl implements PracticeService {
     }
     
     @Override
+    @Transactional
     public Map<String, Object> submitPractice(Long practiceId, Long studentId, List<Map<String, Object>> answers) {
         // 检查练习记录是否存在
         StudentPractice studentPractice = studentPracticeMapper.selectByStudentAndPractice(studentId, practiceId);
@@ -193,12 +230,79 @@ public class PracticeServiceImpl implements PracticeService {
             throw new PracticeException(PracticeConstants.ERROR_PRACTICE_ALREADY_COMPLETED);
         }
         
-        // 计算得分（这里简化处理，实际应该根据题目答案计算）
-        int score = calculateScore(answers);
-        int accuracy = calculateAccuracy(answers);
+        // 创建或获取StudentExam记录（用于关联答题记录）
+        StudentExam studentExam = getOrCreateStudentExam(studentId, practiceId);
+        
+        // 保存每道题的答题记录到student_answer表
+        List<StudentAnswer> studentAnswers = new ArrayList<>();
+        int totalScore = 0;
+        int correctCount = 0;
+        
+        System.out.println("========================================");
+        System.out.println("📝 开始处理答题记录，共 " + answers.size() + " 道题");
+        
+        for (Map<String, Object> answerData : answers) {
+            Long questionId = Long.valueOf(answerData.get("questionId").toString());
+            String studentAnswerText = answerData.get("answer") != null ? answerData.get("answer").toString() : "";
+            
+            System.out.println("处理题目 ID=" + questionId + ", 学生答案=" + studentAnswerText);
+            
+            // 获取题目信息
+            Question question = questionMapper.selectById(questionId);
+            if (question == null) {
+                System.out.println("⚠️ 题目不存在，跳过: questionId=" + questionId);
+                continue;
+            }
+            
+            System.out.println("✅ 找到题目: " + question.getContent() + ", 正确答案=" + question.getAnswer());
+            
+            // 判断答案是否正确
+            boolean isCorrect = checkAnswer(question, studentAnswerText, answerData);
+            int questionScore = isCorrect ? (question.getScore() != null ? question.getScore() : 10) : 0;
+            
+            System.out.println((isCorrect ? "✅ 答对了" : "❌ 答错了") + ", 得分=" + questionScore);
+            
+            // 创建答题记录
+            StudentAnswer studentAnswer = new StudentAnswer();
+            studentAnswer.setStudentExamId(studentExam.getId());
+            studentAnswer.setQuestionId(questionId);
+            studentAnswer.setAnswer(studentAnswerText);
+            studentAnswer.setIsCorrect(isCorrect);
+            studentAnswer.setScore(questionScore);
+            studentAnswer.setCreateTime(LocalDateTime.now());
+            studentAnswer.setUpdateTime(LocalDateTime.now());
+            
+            studentAnswers.add(studentAnswer);
+            totalScore += questionScore;
+            if (isCorrect) {
+                correctCount++;
+            }
+        }
+        
+        System.out.println("========================================");
+        System.out.println("📊 答题统计: 总分=" + totalScore + ", 正确数=" + correctCount + ", 总题数=" + answers.size());
+        System.out.println("准备批量插入 " + studentAnswers.size() + " 条答题记录到 student_answer 表");
+        
+        // 批量插入答题记录
+        if (!studentAnswers.isEmpty()) {
+            try {
+                studentAnswerMapper.batchInsert(studentAnswers);
+                System.out.println("✅ 成功插入 " + studentAnswers.size() + " 条答题记录");
+            } catch (Exception e) {
+                System.err.println("❌ 批量插入答题记录失败: " + e.getMessage());
+                e.printStackTrace();
+                throw e;
+            }
+        } else {
+            System.out.println("⚠️ 没有答题记录需要插入");
+        }
+        System.out.println("========================================");
+        
+        // 计算正确率
+        int accuracy = answers.isEmpty() ? 0 : (int) ((double) correctCount / answers.size() * 100);
         
         // 更新练习记录
-        studentPractice.setScore(score);
+        studentPractice.setScore(totalScore);
         studentPractice.setAccuracy(accuracy);
         studentPractice.setStatus(PracticeConstants.STUDENT_STATUS_COMPLETED);
         studentPractice.setCompleteTime(LocalDateTime.now());
@@ -212,17 +316,85 @@ public class PracticeServiceImpl implements PracticeService {
         
         studentPracticeMapper.update(studentPractice);
         
+        // 更新StudentExam记录
+        studentExam.setScore(totalScore);
+        studentExam.setStatus("submitted");
+        studentExam.setSubmitTime(LocalDateTime.now());
+        studentExam.setUpdateTime(LocalDateTime.now());
+        studentExamMapper.update(studentExam);
+        
         Map<String, Object> result = new HashMap<>();
         result.put("practiceId", practiceId);
         result.put("studentId", studentId);
-        result.put("score", score);
+        result.put("score", totalScore);
         result.put("totalScore", studentPractice.getTotalScore());
         result.put("accuracy", accuracy);
+        result.put("correctCount", correctCount);
+        result.put("totalCount", answers.size());
         result.put("status", "completed");
         result.put("completeTime", studentPractice.getCompleteTime());
         result.put("duration", studentPractice.getDuration());
         
         return result;
+    }
+    
+    /**
+     * 获取或创建StudentExam记录
+     */
+    private StudentExam getOrCreateStudentExam(Long studentId, Long practiceId) {
+        // 查找是否已存在（使用practiceId作为examId）
+        StudentExam studentExam = studentExamMapper.selectByStudentAndExam(studentId, practiceId);
+        
+        if (studentExam == null) {
+            // 创建新的StudentExam记录
+            studentExam = new StudentExam();
+            studentExam.setStudentId(studentId);
+            studentExam.setExamId(practiceId); // 使用practiceId作为examId
+            studentExam.setTotalScore(100);
+            studentExam.setStatus("in_progress");
+            studentExam.setStartTime(LocalDateTime.now());
+            studentExam.setCreateTime(LocalDateTime.now());
+            studentExam.setUpdateTime(LocalDateTime.now());
+            studentExamMapper.insert(studentExam);
+        }
+        
+        return studentExam;
+    }
+    
+    /**
+     * 检查答案是否正确
+     */
+    private boolean checkAnswer(Question question, String studentAnswer, Map<String, Object> answerData) {
+        if (question.getAnswer() == null || studentAnswer == null) {
+            return false;
+        }
+        
+        String correctAnswer = question.getAnswer().trim();
+        String userAnswer = studentAnswer.trim();
+        
+        // 根据题目类型判断
+        String questionType = question.getType();
+        
+        if ("single_choice".equals(questionType) || "choice".equals(questionType)) {
+            // 单选题：直接比较
+            return correctAnswer.equalsIgnoreCase(userAnswer);
+        } else if ("multiple_choice".equals(questionType) || "multiple".equals(questionType)) {
+            // 多选题：比较选项（需要排序后比较）
+            String[] correctOptions = correctAnswer.split(",");
+            String[] userOptions = userAnswer.split(",");
+            java.util.Arrays.sort(correctOptions);
+            java.util.Arrays.sort(userOptions);
+            return java.util.Arrays.equals(correctOptions, userOptions);
+        } else if ("true_false".equals(questionType) || "judge".equals(questionType)) {
+            // 判断题
+            return correctAnswer.equalsIgnoreCase(userAnswer);
+        } else if ("fill_blank".equals(questionType) || "short_answer".equals(questionType)) {
+            // 填空题和简答题：包含关键词即可（简化处理）
+            return correctAnswer.equalsIgnoreCase(userAnswer) || 
+                   userAnswer.toLowerCase().contains(correctAnswer.toLowerCase());
+        }
+        
+        return false;
     }
     
     @Override

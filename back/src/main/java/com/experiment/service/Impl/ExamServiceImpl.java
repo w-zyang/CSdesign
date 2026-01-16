@@ -21,6 +21,9 @@ import com.experiment.pojo.User;
 import com.experiment.result.PageResult;
 import com.experiment.service.ExamService;
 
+import lombok.extern.slf4j.Slf4j;
+
+@Slf4j
 @Service
 public class ExamServiceImpl implements ExamService {
     
@@ -38,6 +41,9 @@ public class ExamServiceImpl implements ExamService {
     
     @Autowired
     private UserMapper userMapper;
+    
+    @Autowired(required = false)
+    private com.experiment.service.QuestionGenerationService questionGenerationService;
     
     @Override
     @Transactional
@@ -180,7 +186,7 @@ public class ExamServiceImpl implements ExamService {
     @Override
     @Transactional
     public Exam generateExam(Long courseId, String examType, Integer questionCount) {
-        // 模拟智能生成考试
+        // 智能生成考试（使用题库+AI）
         Exam exam = new Exam();
         exam.setCourseId(courseId);
         exam.setType(examType);
@@ -193,10 +199,17 @@ public class ExamServiceImpl implements ExamService {
         
         examMapper.insert(exam);
         
-        // 生成题目
-        List<Question> questions = generateQuestions(exam.getId(), questionCount);
-        questionMapper.batchInsert(questions);
-        exam.setQuestions(questions);
+        // 使用智能出题服务生成题目（优先从题库获取，速度更快）
+        List<Question> questions = generateQuestionsWithAI(exam.getId(), questionCount, examType);
+        
+        if (!questions.isEmpty()) {
+            // 设置examId
+            for (Question question : questions) {
+                question.setExamId(exam.getId());
+            }
+            questionMapper.batchInsert(questions);
+            exam.setQuestions(questions);
+        }
         
         return exam;
     }
@@ -211,8 +224,91 @@ public class ExamServiceImpl implements ExamService {
         }
     }
     
-    private List<Question> generateQuestions(Long examId, Integer count) {
-        // 模拟生成题目
+    /**
+     * 使用AI智能生成题目（集成题库，提升速度）
+     */
+    private List<Question> generateQuestionsWithAI(Long examId, Integer count, String examType) {
+        // 检查智能出题服务是否可用
+        if (questionGenerationService == null) {
+            log.warn("智能出题服务未启用，使用备用方案");
+            return generateQuestionsFallback(examId, count);
+        }
+        
+        try {
+            // 根据考试类型确定题目配置
+            String subject = "计算机科学";
+            String knowledgePoint = getKnowledgePointByExamType(examType);
+            
+            // 生成不同类型的题目
+            List<Question> allQuestions = new java.util.ArrayList<>();
+            
+            // 单选题 (50%)
+            int singleChoiceCount = (int) (count * 0.5);
+            if (singleChoiceCount > 0) {
+                List<Question> singleChoiceQuestions = questionGenerationService.generateQuestions(
+                    subject, knowledgePoint, "single_choice", "medium", singleChoiceCount);
+                allQuestions.addAll(singleChoiceQuestions);
+            }
+            
+            // 多选题 (30%)
+            int multipleChoiceCount = (int) (count * 0.3);
+            if (multipleChoiceCount > 0) {
+                List<Question> multipleChoiceQuestions = questionGenerationService.generateQuestions(
+                    subject, knowledgePoint, "multiple_choice", "medium", multipleChoiceCount);
+                allQuestions.addAll(multipleChoiceQuestions);
+            }
+            
+            // 简答题 (20%)
+            int shortAnswerCount = count - singleChoiceCount - multipleChoiceCount;
+            if (shortAnswerCount > 0) {
+                List<Question> shortAnswerQuestions = questionGenerationService.generateQuestions(
+                    subject, knowledgePoint, "short_answer", "medium", shortAnswerCount);
+                allQuestions.addAll(shortAnswerQuestions);
+            }
+            
+            // 如果AI生成失败，使用备用方案
+            if (allQuestions.isEmpty()) {
+                log.warn("AI生成题目为空，使用备用方案");
+                return generateQuestionsFallback(examId, count);
+            }
+            
+            // 设置排序和分值
+            int totalScore = 100;
+            int scorePerQuestion = totalScore / allQuestions.size();
+            for (int i = 0; i < allQuestions.size(); i++) {
+                Question question = allQuestions.get(i);
+                question.setExamId(examId);
+                question.setSortOrder(i + 1);
+                if (question.getScore() == null || question.getScore() == 0) {
+                    question.setScore(scorePerQuestion);
+                }
+            }
+            
+            return allQuestions;
+            
+        } catch (Exception e) {
+            log.error("AI生成题目失败，使用备用方案", e);
+            return generateQuestionsFallback(examId, count);
+        }
+    }
+    
+    /**
+     * 根据考试类型获取知识点
+     */
+    private String getKnowledgePointByExamType(String examType) {
+        switch (examType) {
+            case "quiz": return "基础概念";
+            case "midterm": return "综合应用";
+            case "final": return "系统设计";
+            case "homework": return "实践操作";
+            default: return "计算机基础";
+        }
+    }
+    
+    /**
+     * 备用方案：简单生成题目
+     */
+    private List<Question> generateQuestionsFallback(Long examId, Integer count) {
         List<Question> questions = new java.util.ArrayList<>();
         Random random = new Random();
         

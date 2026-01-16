@@ -111,7 +111,7 @@ public class ErrorQuestionController {
     @PostMapping("/training/comprehensive")
     public Result<ErrorQuestionTrainingDTO> generateComprehensiveTraining(@RequestBody Map<String, Object> request) {
         Long studentId = ((Number) request.get("studentId")).longValue();
-        Integer questionCount = (Integer) request.getOrDefault("questionCount", 10);
+        Integer questionCount = (Integer) request.getOrDefault("questionCount", 5); // 改为5道，加快生成速度
         
         log.info("为学生 {} 生成综合错题训练，数量: {}", studentId, questionCount);
         

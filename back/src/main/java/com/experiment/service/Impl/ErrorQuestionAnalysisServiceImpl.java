@@ -2,6 +2,7 @@ package com.experiment.service.Impl;
 
 import com.experiment.mapper.StudentExamMapper;
 import com.experiment.mapper.QuestionMapper;
+import com.experiment.mapper.StudentAnswerMapper;
 import com.experiment.pojo.ErrorQuestionAnalysisDTO;
 import com.experiment.pojo.ErrorQuestionTrainingDTO;
 import com.experiment.pojo.StudentExam;
@@ -30,6 +31,9 @@ public class ErrorQuestionAnalysisServiceImpl implements ErrorQuestionAnalysisSe
     private QuestionMapper questionMapper;
     
     @Autowired
+    private StudentAnswerMapper studentAnswerMapper;
+    
+    @Autowired
     private AIService aiService;
     
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -41,13 +45,53 @@ public class ErrorQuestionAnalysisServiceImpl implements ErrorQuestionAnalysisSe
         List<ErrorQuestionAnalysisDTO> errorAnalysisList = new ArrayList<>();
         
         try {
-            // 获取学生的考试记录
-            List<StudentExam> studentExams = studentExamMapper.selectByStudentId(studentId);
+            // 从数据库查询学生的所有错题
+            List<Map<String, Object>> errorQuestions = studentAnswerMapper.selectErrorQuestionsByStudentId(studentId);
             
-            // 模拟错题数据（在实际实现中，这里应该从student_answer表中查询错误答案）
-            errorAnalysisList = generateMockErrorQuestions(studentId);
+            log.info("学生 {} 共有 {} 道错题记录", studentId, errorQuestions.size());
             
-            log.info("学生 {} 的错题分析完成，共发现 {} 道错题", studentId, errorAnalysisList.size());
+            // 转换为DTO对象
+            for (Map<String, Object> errorData : errorQuestions) {
+                ErrorQuestionAnalysisDTO analysis = new ErrorQuestionAnalysisDTO();
+                
+                // 基本信息
+                analysis.setQuestionId(getLongValue(errorData.get("question_id")));
+                analysis.setQuestionContent((String) errorData.get("question_content"));
+                analysis.setQuestionType((String) errorData.get("question_type"));
+                analysis.setKnowledgePoint((String) errorData.get("knowledge_point"));
+                analysis.setDifficulty((String) errorData.get("difficulty"));
+                analysis.setCorrectAnswer((String) errorData.get("correct_answer"));
+                analysis.setStudentAnswer((String) errorData.get("student_answer"));
+                
+                // 统计信息
+                int errorCount = getIntValue(errorData.get("error_count"));
+                int totalAttempts = getIntValue(errorData.get("total_attempts"));
+                double errorRate = totalAttempts > 0 ? (errorCount * 100.0 / totalAttempts) : 0.0;
+                
+                analysis.setErrorCount(errorCount);
+                analysis.setErrorRate(errorRate);
+                analysis.setLastErrorTime((LocalDateTime) errorData.get("last_error_time"));
+                
+                // 分析错误类型和原因
+                String errorType = analyzeErrorType(analysis.getQuestionType(), 
+                    analysis.getStudentAnswer(), analysis.getCorrectAnswer());
+                analysis.setErrorType(errorType);
+                analysis.setErrorReason(generateErrorReason(errorType, analysis.getKnowledgePoint()));
+                
+                // 生成改进建议
+                analysis.setImprovementSuggestion(generateImprovementSuggestion(
+                    analysis.getKnowledgePoint(), errorType, errorRate));
+                
+                // 提取相关概念（从知识点推导）
+                analysis.setRelatedConcepts(extractRelatedConcepts(analysis.getKnowledgePoint()));
+                
+                // 设置主题（从知识点推导）
+                analysis.setTopic(extractTopic(analysis.getKnowledgePoint()));
+                
+                errorAnalysisList.add(analysis);
+            }
+            
+            log.info("学生 {} 的错题分析完成，共分析 {} 道错题", studentId, errorAnalysisList.size());
         } catch (Exception e) {
             log.error("分析学生错题失败", e);
         }
@@ -60,24 +104,56 @@ public class ErrorQuestionAnalysisServiceImpl implements ErrorQuestionAnalysisSe
         log.info("分析学生 {} 的特定错题 {}", studentId, questionId);
         
         try {
-            // 这里应该查询特定题目的错误记录
-            // 目前使用模拟数据
+            // 查询题目信息
+            Question question = questionMapper.selectById(questionId);
+            if (question == null) {
+                log.warn("题目 {} 不存在", questionId);
+                return null;
+            }
+            
+            // 查询学生对该题的错误记录
+            List<Map<String, Object>> errorRecords = studentAnswerMapper.selectErrorRecordsByStudentAndQuestion(studentId, questionId);
+            if (errorRecords.isEmpty()) {
+                log.warn("学生 {} 没有题目 {} 的错误记录", studentId, questionId);
+                return null;
+            }
+            
+            // 统计错误次数和总次数
+            Integer errorCount = studentAnswerMapper.countErrorsByStudentAndQuestion(studentId, questionId);
+            Integer totalAttempts = studentAnswerMapper.countTotalByStudentAndQuestion(studentId, questionId);
+            double errorRate = totalAttempts > 0 ? (errorCount * 100.0 / totalAttempts) : 0.0;
+            
+            // 获取最近一次错误记录
+            Map<String, Object> latestError = errorRecords.get(0);
+            
+            // 构建分析DTO
             ErrorQuestionAnalysisDTO analysis = new ErrorQuestionAnalysisDTO();
             analysis.setQuestionId(questionId);
-            analysis.setQuestionContent("Linux系统中，下列哪个命令用于查看当前目录下的文件？");
-            analysis.setQuestionType("choice");
-            analysis.setKnowledgePoint("Linux基础命令");
-            analysis.setTopic("操作系统");
-            analysis.setDifficulty("easy");
-            analysis.setStudentAnswer("B");
-            analysis.setCorrectAnswer("A");
-            analysis.setErrorType("概念混淆");
-            analysis.setErrorReason("将ls命令与cd命令功能混淆");
-            analysis.setErrorCount(3);
-            analysis.setErrorRate(75.0);
-            analysis.setLastErrorTime(LocalDateTime.now().minusDays(2));
-            analysis.setRelatedConcepts(Arrays.asList("文件系统", "命令行操作", "目录浏览"));
-            analysis.setImprovementSuggestion("加强Linux基础命令的练习，特别是文件操作相关命令");
+            analysis.setQuestionContent(question.getContent());
+            analysis.setQuestionType(question.getType());
+            analysis.setKnowledgePoint(question.getKnowledgePoint());
+            analysis.setDifficulty(question.getDifficulty());
+            analysis.setCorrectAnswer(question.getAnswer());
+            analysis.setStudentAnswer((String) latestError.get("student_answer"));
+            analysis.setErrorCount(errorCount);
+            analysis.setErrorRate(errorRate);
+            analysis.setLastErrorTime((LocalDateTime) latestError.get("create_time"));
+            
+            // 分析错误类型和原因
+            String errorType = analyzeErrorType(question.getType(), 
+                analysis.getStudentAnswer(), analysis.getCorrectAnswer());
+            analysis.setErrorType(errorType);
+            analysis.setErrorReason(generateErrorReason(errorType, question.getKnowledgePoint()));
+            
+            // 生成改进建议
+            analysis.setImprovementSuggestion(generateImprovementSuggestion(
+                question.getKnowledgePoint(), errorType, errorRate));
+            
+            // 提取相关概念
+            analysis.setRelatedConcepts(extractRelatedConcepts(question.getKnowledgePoint()));
+            
+            // 设置主题
+            analysis.setTopic(extractTopic(question.getKnowledgePoint()));
             
             return analysis;
         } catch (Exception e) {
@@ -358,68 +434,173 @@ public class ErrorQuestionAnalysisServiceImpl implements ErrorQuestionAnalysisSe
     }
 
     // 私有辅助方法
-
-    private List<ErrorQuestionAnalysisDTO> generateMockErrorQuestions(Long studentId) {
-        List<ErrorQuestionAnalysisDTO> errorQuestions = new ArrayList<>();
+    
+    /**
+     * 获取Long类型值
+     */
+    private Long getLongValue(Object value) {
+        if (value == null) return null;
+        if (value instanceof Long) return (Long) value;
+        if (value instanceof Integer) return ((Integer) value).longValue();
+        if (value instanceof String) return Long.parseLong((String) value);
+        return null;
+    }
+    
+    /**
+     * 获取Integer类型值
+     */
+    private Integer getIntValue(Object value) {
+        if (value == null) return 0;
+        if (value instanceof Integer) return (Integer) value;
+        if (value instanceof Long) return ((Long) value).intValue();
+        if (value instanceof String) return Integer.parseInt((String) value);
+        return 0;
+    }
+    
+    /**
+     * 分析错误类型
+     */
+    private String analyzeErrorType(String questionType, String studentAnswer, String correctAnswer) {
+        if (studentAnswer == null || studentAnswer.trim().isEmpty()) {
+            return "未作答";
+        }
         
-        // 模拟数据1
-        ErrorQuestionAnalysisDTO error1 = new ErrorQuestionAnalysisDTO();
-        error1.setQuestionId(1L);
-        error1.setQuestionContent("Linux系统中，下列哪个命令用于查看当前目录下的文件？");
-        error1.setQuestionType("choice");
-        error1.setKnowledgePoint("Linux基础命令");
-        error1.setTopic("操作系统");
-        error1.setDifficulty("easy");
-        error1.setStudentAnswer("B");
-        error1.setCorrectAnswer("A");
-        error1.setErrorType("概念混淆");
-        error1.setErrorReason("将ls命令与cd命令功能混淆");
-        error1.setErrorCount(3);
-        error1.setErrorRate(75.0);
-        error1.setLastErrorTime(LocalDateTime.now().minusDays(2));
-        error1.setRelatedConcepts(Arrays.asList("文件系统", "命令行操作", "目录浏览"));
-        error1.setImprovementSuggestion("加强Linux基础命令的练习");
-        errorQuestions.add(error1);
+        // 选择题
+        if ("choice".equals(questionType) || "single_choice".equals(questionType)) {
+            if (Math.abs(studentAnswer.charAt(0) - correctAnswer.charAt(0)) == 1) {
+                return "选项混淆";
+            } else {
+                return "概念理解错误";
+            }
+        }
         
-        // 模拟数据2
-        ErrorQuestionAnalysisDTO error2 = new ErrorQuestionAnalysisDTO();
-        error2.setQuestionId(2L);
-        error2.setQuestionContent("数据结构中，栈的特点是什么？");
-        error2.setQuestionType("choice");
-        error2.setKnowledgePoint("数据结构基础");
-        error2.setTopic("数据结构与算法");
-        error2.setDifficulty("medium");
-        error2.setStudentAnswer("C");
-        error2.setCorrectAnswer("A");
-        error2.setErrorType("理解错误");
-        error2.setErrorReason("对LIFO(后进先出)概念理解不准确");
-        error2.setErrorCount(2);
-        error2.setErrorRate(66.7);
-        error2.setLastErrorTime(LocalDateTime.now().minusDays(5));
-        error2.setRelatedConcepts(Arrays.asList("LIFO", "数据结构", "栈操作"));
-        error2.setImprovementSuggestion("重点复习栈的基本概念和操作");
-        errorQuestions.add(error2);
+        // 填空题
+        if ("fill".equals(questionType)) {
+            if (studentAnswer.length() < correctAnswer.length() / 2) {
+                return "知识点缺失";
+            } else {
+                return "细节错误";
+            }
+        }
         
-        // 模拟数据3
-        ErrorQuestionAnalysisDTO error3 = new ErrorQuestionAnalysisDTO();
-        error3.setQuestionId(3L);
-        error3.setQuestionContent("网络协议TCP和UDP的主要区别是什么？");
-        error3.setQuestionType("short");
-        error3.setKnowledgePoint("网络协议");
-        error3.setTopic("计算机网络");
-        error3.setDifficulty("hard");
-        error3.setStudentAnswer("TCP比UDP快");
-        error3.setCorrectAnswer("TCP是面向连接的可靠协议，UDP是无连接的不可靠协议");
-        error3.setErrorType("知识点缺失");
-        error3.setErrorReason("对协议特性理解不全面");
-        error3.setErrorCount(4);
-        error3.setErrorRate(80.0);
-        error3.setLastErrorTime(LocalDateTime.now().minusDays(1));
-        error3.setRelatedConcepts(Arrays.asList("传输协议", "可靠性", "连接机制"));
-        error3.setImprovementSuggestion("系统学习网络协议的基本特性");
-        errorQuestions.add(error3);
+        // 简答题
+        if ("short".equals(questionType) || "short_answer".equals(questionType)) {
+            if (studentAnswer.length() < 20) {
+                return "回答不完整";
+            } else {
+                return "理解偏差";
+            }
+        }
         
-        return errorQuestions;
+        // 编程题
+        if ("coding".equals(questionType)) {
+            return "逻辑错误";
+        }
+        
+        return "答案错误";
+    }
+    
+    /**
+     * 生成错误原因
+     */
+    private String generateErrorReason(String errorType, String knowledgePoint) {
+        switch (errorType) {
+            case "未作答":
+                return "对" + knowledgePoint + "不熟悉，未能作答";
+            case "选项混淆":
+                return "对" + knowledgePoint + "的相似概念区分不清";
+            case "概念理解错误":
+                return "对" + knowledgePoint + "的核心概念理解有误";
+            case "知识点缺失":
+                return knowledgePoint + "相关知识掌握不全面";
+            case "细节错误":
+                return "对" + knowledgePoint + "的细节把握不准确";
+            case "回答不完整":
+                return "对" + knowledgePoint + "的理解不够深入";
+            case "理解偏差":
+                return "对" + knowledgePoint + "的理解存在偏差";
+            case "逻辑错误":
+                return knowledgePoint + "相关的编程逻辑有误";
+            default:
+                return "对" + knowledgePoint + "掌握不够扎实";
+        }
+    }
+    
+    /**
+     * 生成改进建议
+     */
+    private String generateImprovementSuggestion(String knowledgePoint, String errorType, double errorRate) {
+        StringBuilder suggestion = new StringBuilder();
+        
+        if (errorRate >= 70) {
+            suggestion.append("该知识点错误率较高，建议：");
+            suggestion.append("1. 系统复习").append(knowledgePoint).append("的基础概念；");
+            suggestion.append("2. 多做相关练习题巩固理解；");
+            suggestion.append("3. 寻求老师或同学的帮助。");
+        } else if (errorRate >= 40) {
+            suggestion.append("该知识点掌握一般，建议：");
+            suggestion.append("1. 重点复习").append(knowledgePoint).append("的易错点；");
+            suggestion.append("2. 通过练习加深理解。");
+        } else {
+            suggestion.append("该知识点基本掌握，建议：");
+            suggestion.append("1. 注意").append(knowledgePoint).append("的细节；");
+            suggestion.append("2. 保持练习频率。");
+        }
+        
+        return suggestion.toString();
+    }
+    
+    /**
+     * 提取相关概念
+     */
+    private List<String> extractRelatedConcepts(String knowledgePoint) {
+        List<String> concepts = new ArrayList<>();
+        
+        if (knowledgePoint == null) {
+            return concepts;
+        }
+        
+        // 简单的关键词提取（实际应用中可以使用更复杂的NLP技术）
+        if (knowledgePoint.contains("数据结构")) {
+            concepts.addAll(Arrays.asList("栈", "队列", "链表", "树"));
+        } else if (knowledgePoint.contains("算法")) {
+            concepts.addAll(Arrays.asList("时间复杂度", "空间复杂度", "排序", "查找"));
+        } else if (knowledgePoint.contains("网络")) {
+            concepts.addAll(Arrays.asList("协议", "TCP/IP", "HTTP", "Socket"));
+        } else if (knowledgePoint.contains("操作系统") || knowledgePoint.contains("Linux")) {
+            concepts.addAll(Arrays.asList("进程", "线程", "文件系统", "命令行"));
+        } else if (knowledgePoint.contains("数据库")) {
+            concepts.addAll(Arrays.asList("SQL", "索引", "事务", "查询优化"));
+        } else {
+            // 默认添加知识点本身
+            concepts.add(knowledgePoint);
+        }
+        
+        return concepts;
+    }
+    
+    /**
+     * 提取主题
+     */
+    private String extractTopic(String knowledgePoint) {
+        if (knowledgePoint == null) {
+            return "计算机基础";
+        }
+        
+        if (knowledgePoint.contains("数据结构") || knowledgePoint.contains("算法")) {
+            return "数据结构与算法";
+        } else if (knowledgePoint.contains("网络")) {
+            return "计算机网络";
+        } else if (knowledgePoint.contains("操作系统") || knowledgePoint.contains("Linux")) {
+            return "操作系统";
+        } else if (knowledgePoint.contains("数据库")) {
+            return "数据库系统";
+        } else if (knowledgePoint.contains("编程") || knowledgePoint.contains("Java") || 
+                   knowledgePoint.contains("Python") || knowledgePoint.contains("JavaScript")) {
+            return "程序设计";
+        } else {
+            return "计算机基础";
+        }
     }
 
     private String buildSimilarQuestionPrompt(ErrorQuestionAnalysisDTO originalError, Integer questionCount) {

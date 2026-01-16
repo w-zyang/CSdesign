@@ -137,7 +137,7 @@ public class AIServiceImpl implements AIService {
     
     @Override
     public String chatWithSystem(String systemPrompt, String userMessage) {
-        return chatWithSystemWithRetry(systemPrompt, userMessage, 3);
+        return chatWithSystemWithRetry(systemPrompt, userMessage, 2); // 减少重试次数从3次改为2次，加快响应
     }
     
     /**
@@ -161,8 +161,8 @@ public class AIServiceImpl implements AIService {
 
                 String url = "https://dashscope.aliyuncs.com/api/v1/apps/" + appId + "/completion";
                 org.springframework.http.client.SimpleClientHttpRequestFactory factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
-                factory.setConnectTimeout(10000);
-                factory.setReadTimeout(60000);
+                factory.setConnectTimeout(15000); // 连接超时：15秒
+                factory.setReadTimeout(120000); // 读取超时：120秒（2分钟），加快生成速度
                 org.springframework.web.client.RestTemplate restTemplate = new org.springframework.web.client.RestTemplate(factory);
 
                 java.util.Map<String, Object> input = new java.util.HashMap<>();

@@ -142,10 +142,10 @@
           <el-row :gutter="20">
             <el-col :span="12">
               <el-form-item label="总题目数量">
-                <el-input-number v-model="practiceForm.questionCount" :min="1" :max="50" />
+                <el-input-number v-model="practiceForm.questionCount" :min="1" :max="50" disabled />
                 <div class="question-count-tips">
-                  <el-tag size="small" type="info">建议：5-20题适合单次练习</el-tag>
-                  <el-tag size="small" type="warning">注意：题目过多可能影响生成质量</el-tag>
+                  <el-tag size="small" type="success">自动计算：{{ totalQuestionCount }}道题</el-tag>
+                  <el-tag size="small" type="info">根据上方题型数量自动更新</el-tag>
                 </div>
               </el-form-item>
             </el-col>
@@ -191,6 +191,13 @@
         <el-button @click="resetForm">重置设置</el-button>
         <el-button type="info" @click="testBackend">测试后端连接</el-button>
         <el-button type="warning" @click="healthCheck">健康检查</el-button>
+        <el-button 
+          v-if="practiceQuestions.length > 0" 
+          type="danger" 
+          @click="confirmClearPractice"
+        >
+          清除当前练习
+        </el-button>
       </div>
     </el-card>
     
@@ -203,6 +210,9 @@
               <h3>📝 练习题目</h3>
               <el-tag v-if="selectedExam" type="primary" size="small">
                 来自：{{ selectedExam.name }}
+              </el-tag>
+              <el-tag type="success" size="small" effect="plain">
+                <i class="el-icon-circle-check"></i> 已自动保存
               </el-tag>
             </div>
             <div class="practice-info">
@@ -445,6 +455,26 @@
           </el-row>
         </div>
         
+        <!-- 添加明显的提示信息 -->
+        <el-alert 
+          title="💡 获取详细分析报告" 
+          type="info" 
+          :closable="false"
+          style="margin-bottom: 20px;"
+        >
+          <template #default>
+            <div style="line-height: 1.8;">
+              <p style="margin: 0 0 10px 0; font-size: 14px;">
+                <strong>当前显示的是基础解析。</strong>如需获得更详细的AI分析报告，请点击每道题目右侧的 
+                <el-tag type="primary" size="small" style="margin: 0 5px;">生成分析报告</el-tag> 按钮。
+              </p>
+              <p style="margin: 0; font-size: 13px; color: #606266;">
+                📊 详细分析报告包含：知识点梳理、解题思路、错误原因分析、个性化学习建议等内容
+              </p>
+            </div>
+          </template>
+        </el-alert>
+        
         <div class="result-details">
           <h4>详细分析</h4>
           <div v-for="(analysis, index) in practiceResult.analysis" :key="index" class="analysis-item">
@@ -460,15 +490,30 @@
                   @click="generateReport(index)"
                   :loading="analysis.isTriggering"
                   style="margin-left: 10px;"
+                  :icon="analysis.isTriggering ? 'Loading' : 'MagicStick'"
                 >
-                  生成分析报告
+                  {{ analysis.isTriggering ? 'AI分析中...' : '生成分析报告' }}
                 </el-button>
               </div>
             </div>
             <div class="analysis-content">
               <p><strong>你的答案：</strong>{{ analysis.userAnswer || '未作答' }}</p>
               <p><strong>正确答案：</strong>{{ analysis.correctAnswer }}</p>
-              <p v-if="analysis.explanation"><strong>题目解析：</strong>{{ analysis.explanation }}</p>
+              <p v-if="analysis.explanation"><strong>基础解析：</strong>{{ analysis.explanation }}</p>
+              
+              <!-- 如果还没有生成详细分析，显示提示 -->
+              <div v-if="!analysis.detailedAnalysis || analysis.detailedAnalysis.length < 100" class="need-ai-tip">
+                <el-tag type="warning" size="small" effect="plain">
+                  <i class="el-icon-info"></i> 点击上方"生成分析报告"按钮，获取AI提供的详细解析、知识点梳理和学习建议
+                </el-tag>
+              </div>
+              
+              <!-- 如果已经生成了详细分析，显示成功提示 -->
+              <div v-else class="ai-generated-tip">
+                <el-tag type="success" size="small" effect="plain">
+                  <i class="el-icon-circle-check"></i> 已生成AI详细分析，点击上方按钮可再次查看
+                </el-tag>
+              </div>
             </div>
           </div>
         </div>
@@ -511,12 +556,13 @@
 </template>
 
 <script>
-import { ref, reactive, computed, onUnmounted, nextTick, onMounted } from 'vue'
+import { ref, reactive, computed, onUnmounted, nextTick, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Edit, Loading, CaretRight } from '@element-plus/icons-vue'
 import { aiAPI } from '@/api/ai'
 import { getPublishedExamsByCourseId, getExamById } from '@/api/exam'
+import { submitPractice as submitPracticeAPI, startPractice as startPracticeAPI } from '@/api/practice'
 import axios from 'axios'
 
 export default {
@@ -564,11 +610,154 @@ export default {
     const codeResults = ref({})
     const reportDialogVisible = ref(false)
     const currentReport = ref(null)
+    const currentPracticeId = ref(null) // 保存当前练习的ID
+    
+    // LocalStorage 键名
+    const STORAGE_KEYS = {
+      PRACTICE_QUESTIONS: 'practice_questions',
+      PRACTICE_FORM: 'practice_form',
+      PRACTICE_STARTED: 'practice_started',
+      CURRENT_QUESTION_INDEX: 'current_question_index',
+      USER_ANSWERS: 'user_answers',
+      REMAINING_TIME: 'remaining_time',
+      PRACTICE_RESULT: 'practice_result',
+      SELECTED_EXAM: 'selected_exam',
+      CURRENT_PRACTICE_ID: 'current_practice_id',
+      START_TIME: 'practice_start_time'
+    }
     
     // 计算是否可以生成
     const canGenerate = computed(() => {
       return practiceForm.subject && practiceForm.questionCount > 0
     })
+    
+    // 计算总题目数量（自动等于各题型数量之和）
+    const totalQuestionCount = computed(() => {
+      let total = 0
+      for (const type of practiceForm.questionTypes) {
+        total += practiceForm.typeConfig[type] || 0
+      }
+      return total
+    })
+    
+    // 监听题型配置变化，自动更新总题目数量
+    watch(() => practiceForm.typeConfig, () => {
+      practiceForm.questionCount = totalQuestionCount.value
+    }, { deep: true })
+    
+    // 监听题型选择变化，自动更新总题目数量
+    watch(() => practiceForm.questionTypes, () => {
+      practiceForm.questionCount = totalQuestionCount.value
+    }, { deep: true })
+    
+    // 保存练习数据到 localStorage
+    const savePracticeToStorage = () => {
+      try {
+        localStorage.setItem(STORAGE_KEYS.PRACTICE_QUESTIONS, JSON.stringify(practiceQuestions.value))
+        localStorage.setItem(STORAGE_KEYS.PRACTICE_FORM, JSON.stringify(practiceForm))
+        localStorage.setItem(STORAGE_KEYS.PRACTICE_STARTED, JSON.stringify(practiceStarted.value))
+        localStorage.setItem(STORAGE_KEYS.CURRENT_QUESTION_INDEX, JSON.stringify(currentQuestionIndex.value))
+        localStorage.setItem(STORAGE_KEYS.USER_ANSWERS, JSON.stringify(userAnswers.value))
+        localStorage.setItem(STORAGE_KEYS.REMAINING_TIME, JSON.stringify(remainingTime.value))
+        localStorage.setItem(STORAGE_KEYS.PRACTICE_RESULT, JSON.stringify(practiceResult.value))
+        localStorage.setItem(STORAGE_KEYS.SELECTED_EXAM, JSON.stringify(selectedExam.value))
+        localStorage.setItem(STORAGE_KEYS.CURRENT_PRACTICE_ID, JSON.stringify(currentPracticeId.value))
+        console.log('✅ 练习数据已保存到本地存储')
+      } catch (error) {
+        console.error('❌ 保存练习数据失败:', error)
+      }
+    }
+    
+    // 从 localStorage 恢复练习数据
+    const loadPracticeFromStorage = () => {
+      try {
+        const savedQuestions = localStorage.getItem(STORAGE_KEYS.PRACTICE_QUESTIONS)
+        const savedForm = localStorage.getItem(STORAGE_KEYS.PRACTICE_FORM)
+        const savedStarted = localStorage.getItem(STORAGE_KEYS.PRACTICE_STARTED)
+        const savedIndex = localStorage.getItem(STORAGE_KEYS.CURRENT_QUESTION_INDEX)
+        const savedAnswers = localStorage.getItem(STORAGE_KEYS.USER_ANSWERS)
+        const savedTime = localStorage.getItem(STORAGE_KEYS.REMAINING_TIME)
+        const savedResult = localStorage.getItem(STORAGE_KEYS.PRACTICE_RESULT)
+        const savedExam = localStorage.getItem(STORAGE_KEYS.SELECTED_EXAM)
+        const savedPracticeId = localStorage.getItem(STORAGE_KEYS.CURRENT_PRACTICE_ID)
+        
+        if (savedQuestions) {
+          practiceQuestions.value = JSON.parse(savedQuestions)
+          console.log('✅ 恢复练习题目:', practiceQuestions.value.length, '道题')
+        }
+        
+        if (savedForm) {
+          const formData = JSON.parse(savedForm)
+          Object.assign(practiceForm, formData)
+          console.log('✅ 恢复练习配置')
+        }
+        
+        if (savedStarted) {
+          practiceStarted.value = JSON.parse(savedStarted)
+          console.log('✅ 恢复练习状态:', practiceStarted.value ? '进行中' : '未开始')
+        }
+        
+        if (savedIndex) {
+          currentQuestionIndex.value = JSON.parse(savedIndex)
+          console.log('✅ 恢复当前题目索引:', currentQuestionIndex.value)
+        }
+        
+        if (savedAnswers) {
+          userAnswers.value = JSON.parse(savedAnswers)
+          console.log('✅ 恢复用户答案')
+        }
+        
+        if (savedTime) {
+          remainingTime.value = JSON.parse(savedTime)
+          console.log('✅ 恢复剩余时间:', remainingTime.value, '秒')
+        }
+        
+        if (savedResult) {
+          practiceResult.value = JSON.parse(savedResult)
+          console.log('✅ 恢复练习结果')
+        }
+        
+        if (savedExam) {
+          selectedExam.value = JSON.parse(savedExam)
+          console.log('✅ 恢复选中的考试')
+        }
+        
+        if (savedPracticeId) {
+          currentPracticeId.value = JSON.parse(savedPracticeId)
+          console.log('✅ 恢复练习ID:', currentPracticeId.value)
+        }
+        
+        // 如果练习正在进行中，重新启动计时器
+        if (practiceStarted.value && !practiceResult.value && remainingTime.value > 0) {
+          startTimer()
+          ElMessage.success('已恢复您的练习进度，请继续答题！')
+        }
+        
+        return true
+      } catch (error) {
+        console.error('❌ 恢复练习数据失败:', error)
+        return false
+      }
+    }
+    
+    // 清除 localStorage 中的练习数据
+    const clearPracticeStorage = () => {
+      try {
+        Object.values(STORAGE_KEYS).forEach(key => {
+          localStorage.removeItem(key)
+        })
+        console.log('✅ 已清除本地存储的练习数据')
+      } catch (error) {
+        console.error('❌ 清除练习数据失败:', error)
+      }
+    }
+    
+    // 监听练习数据变化，自动保存
+    watch([practiceQuestions, practiceStarted, currentQuestionIndex, userAnswers, remainingTime, practiceResult], () => {
+      if (practiceQuestions.value.length > 0) {
+        savePracticeToStorage()
+      }
+    }, { deep: true })
     
     // 当前题目
     const currentQuestion = computed(() => {
@@ -581,7 +770,7 @@ export default {
       return ((totalTime - remainingTime.value) / totalTime) * 100
     })
     
-    // 生成练习题目
+    // 生成练习题目（使用新的智能出题接口，支持混合题型）
     const generatePractice = async () => {
       if (!canGenerate.value) {
         ElMessage.warning('请完善练习设置')
@@ -592,29 +781,74 @@ export default {
       
       // 显示详细的加载提示
       ElMessage({
-        message: 'AI正在生成练习题目，预计需要1-3分钟，请耐心等待...',
+        message: 'AI正在基于知识库生成练习题目，预计需要30-60秒，请耐心等待...',
         type: 'info',
-        duration: 0, // 不自动关闭
+        duration: 0,
         showClose: true
       })
       
       try {
-        const requestData = {
-          topic: practiceForm.subject,
-          difficulty: practiceForm.difficulty,
-          count: practiceForm.questionCount,
-          topics: practiceForm.topics,
-          requirements: practiceForm.requirements,
-          questionTypes: practiceForm.questionTypes,
-          typeConfig: practiceForm.typeConfig
+        const difficulty = practiceForm.difficulty === 'beginner' ? 'easy' : 
+                          practiceForm.difficulty === 'intermediate' ? 'medium' : 'hard'
+        const knowledgePoint = practiceForm.topics || practiceForm.subject
+        
+        // 收集所有生成的题目
+        const allQuestions = []
+        
+        // 根据选中的题型分别生成
+        for (const questionType of practiceForm.questionTypes) {
+          const count = practiceForm.typeConfig[questionType] || 1
+          
+          // 映射前端题型到后端题型
+          const typeMap = {
+            'choice': 'single_choice',
+            'fill': 'fill',
+            'short': 'short_answer',
+            'coding': 'coding',
+            'essay': 'essay'
+          }
+          
+          const backendType = typeMap[questionType] || 'single_choice'
+          
+          const requestData = {
+            subject: practiceForm.subject,
+            knowledgePoint: knowledgePoint,
+            type: backendType,
+            difficulty: difficulty,
+            count: count
+          }
+          
+          console.log(`📚 生成${count}道${questionType}题目:`, requestData)
+          
+          try {
+            const response = await axios.post('/api/question-bank/generate', requestData)
+            console.log(`✅ ${questionType}题目生成成功:`, response)
+            
+            if (response.data && response.data.success && response.data.data) {
+              const questions = response.data.data
+              const convertedQuestions = questions.map(q => ({
+                id: q.id, // 保留题目ID
+                title: q.content,
+                type: questionType, // 使用前端的题型名称
+                content: q.content,
+                options: q.options ? q.options.map(opt => opt.content) : null,
+                answer: q.answer,
+                explanation: q.analysis || '',
+                difficulty: q.difficulty || 'medium',
+                score: q.score || 10
+              }))
+              
+              allQuestions.push(...convertedQuestions)
+            }
+          } catch (error) {
+            console.error(`生成${questionType}题目失败:`, error)
+            ElMessage.warning(`${getQuestionTypeName(questionType)}生成失败，已跳过`)
+          }
         }
         
-        console.log('发送生成练习题目请求:', requestData)
-        const response = await aiAPI.generatePractice(requestData)
-        console.log('收到生成练习题目响应:', response)
-        
-        if (response.success === true && response.data && response.data.questions) {
-          practiceQuestions.value = response.data.questions
+        if (allQuestions.length > 0) {
+          practiceQuestions.value = allQuestions
+          
           // 根据题目类型初始化答案数组
           userAnswers.value = practiceQuestions.value.map(q => {
             if (q.type === 'fill' && q.blanks && Array.isArray(q.blanks)) {
@@ -625,10 +859,12 @@ export default {
           
           // 关闭加载提示并显示成功消息
           ElMessage.closeAll()
-          ElMessage.success(`练习题目生成成功！共${practiceQuestions.value.length}道题目`)
+          ElMessage.success(`✅ 基于知识库生成题目成功！共${practiceQuestions.value.length}道题目`)
+          
+          // 保存到本地存储
+          savePracticeToStorage()
         } else {
-          console.error('响应格式错误:', response)
-          throw new Error(response.msg || '生成失败：响应格式错误')
+          throw new Error('所有题型生成都失败了')
         }
       } catch (error) {
         console.error('生成练习题目失败:', error)
@@ -684,15 +920,54 @@ export default {
       practiceStarted.value = false
       practiceResult.value = null
       codeResults.value = {}
+      
+      // 清除本地存储
+      clearPracticeStorage()
+      
       ElMessage.success('设置已重置')
     }
     
     // 开始练习
-    const startPractice = () => {
-      practiceStarted.value = true
-      currentQuestionIndex.value = 0
-      remainingTime.value = practiceForm.timeLimit * 60
-      startTimer()
+    const startPractice = async () => {
+      try {
+        // 获取当前登录学生ID
+        const userInfo = JSON.parse(localStorage.getItem('userInfo') || '{}')
+        const studentId = userInfo.id || userInfo.userId || 17 // 使用默认ID 17 作为后备
+        
+        console.log('用户信息:', userInfo)
+        console.log('学生ID:', studentId)
+        
+        if (!studentId) {
+          ElMessage.warning('未检测到登录信息，使用默认学生ID')
+        }
+        
+        // 生成practiceId
+        const practiceId = selectedExam.value ? selectedExam.value.id : Date.now()
+        console.log('📝 开始练习 - practiceId:', practiceId, 'studentId:', studentId)
+        
+        // 直接调用开始练习API（后端会自动处理）
+        const startResponse = await startPracticeAPI({ practiceId, studentId })
+        console.log('✅ 开始练习API响应:', startResponse)
+        
+        if (!startResponse || !startResponse.success) {
+          throw new Error(startResponse?.msg || '开始练习失败')
+        }
+        
+        // 保存后端返回的practiceId（可能是数据库自动生成的）
+        currentPracticeId.value = startResponse.data?.practiceId || practiceId
+        console.log('💾 保存practiceId:', currentPracticeId.value)
+        
+        ElMessage.success('练习已开始，开始答题吧！')
+        
+        practiceStarted.value = true
+        currentQuestionIndex.value = 0
+        remainingTime.value = practiceForm.timeLimit * 60
+        startTimer()
+      } catch (error) {
+        console.error('❌ 开始练习失败:', error)
+        ElMessage.error('开始练习失败: ' + (error.response?.data?.msg || error.message || '未知错误'))
+        // 不继续执行，让用户重新尝试
+      }
     }
     
     // 开始计时器
@@ -797,7 +1072,74 @@ export default {
       stopTimer()
       
       try {
-        // 处理多题型答案
+        // 获取当前登录学生ID
+        const userInfo = JSON.parse(localStorage.getItem('userInfo') || '{}')
+        const studentId = userInfo.id || userInfo.userId || 17 // 使用默认ID 17 作为后备
+        
+        console.log('提交练习 - 用户信息:', userInfo)
+        console.log('提交练习 - 学生ID:', studentId)
+        
+        if (!studentId) {
+          ElMessage.warning('未检测到登录信息，使用默认学生ID')
+        }
+        
+        // 准备提交数据 - 调用练习提交API保存到数据库
+        const practiceId = currentPracticeId.value // 使用保存的practiceId
+        console.log('📝 使用保存的practiceId:', practiceId)
+        
+        if (!practiceId) {
+          throw new Error('练习ID丢失，请重新开始练习')
+        }
+        
+        // 构建答案数组 - 确保格式匹配后端DTO
+        const answersForSubmit = practiceQuestions.value.map((q, idx) => {
+          let answer = userAnswers.value[idx]
+          if (q.type === 'fill' && Array.isArray(answer)) {
+            answer = answer.join('；')
+          }
+          const questionId = q.id || (idx + 1)
+          console.log(`题目${idx + 1}: ID=${questionId}, 答案=${answer}, 类型=${q.type}`)
+          
+          // 构建符合DTO格式的答案对象
+          const answerItem = {
+            questionId: questionId,
+            answer: answer ? answer.toString() : '',
+            questionType: q.type || 'choice',
+            selectedOptions: null // 如果是多选题，这里应该是选项数组
+          }
+          
+          return answerItem
+        })
+        
+        console.log('所有题目信息:', practiceQuestions.value.map(q => ({ id: q.id, title: q.title })))
+        
+        // 构建完整的请求数据，匹配PracticeAnswerDTO格式
+        const submitData = {
+          practiceId: practiceId,
+          studentId: studentId,
+          answers: answersForSubmit
+        }
+        
+        // 先调用练习提交API保存答题记录
+        console.log('提交练习到数据库:', submitData)
+        try {
+          // 尝试使用标准接口
+          const submitResponse = await submitPracticeAPI(submitData)
+          console.log('✅ 练习提交响应:', submitResponse)
+          
+          if (submitResponse && submitResponse.success) {
+            ElMessage.success('答题记录已保存到数据库！')
+          } else {
+            console.warn('⚠️ 提交返回success=false:', submitResponse)
+          }
+        } catch (submitError) {
+          console.error('❌ 练习提交API调用失败:', submitError)
+          console.error('错误详情:', submitError.response || submitError.message)
+          ElMessage.error('保存答题记录失败: ' + (submitError.message || '未知错误'))
+          // 继续执行AI评测，不中断流程
+        }
+        
+        // 然后调用AI评测获取详细分析
         const answers = practiceQuestions.value.map((q, idx) => {
           if (q.type === 'fill' && Array.isArray(userAnswers.value[idx])) {
             return userAnswers.value[idx].join('；')
@@ -1025,6 +1367,10 @@ export default {
       practiceStarted.value = false
       currentQuestionIndex.value = 0
       userAnswers.value = new Array(practiceQuestions.value.length).fill('')
+      
+      // 保存状态到本地存储
+      savePracticeToStorage()
+      
       ElMessage.success('可以重新开始练习')
     }
     
@@ -1071,6 +1417,44 @@ export default {
       } catch (error) {
         console.error('健康检查失败:', error)
         ElMessage.error('健康检查失败')
+      }
+    }
+    
+    // 确认清除练习
+    const confirmClearPractice = async () => {
+      try {
+        await ElMessageBox.confirm(
+          '确定要清除当前练习吗？这将删除所有题目、答案和进度，且无法恢复。',
+          '确认清除',
+          {
+            confirmButtonText: '确定清除',
+            cancelButtonText: '取消',
+            type: 'warning'
+          }
+        )
+        
+        // 清除所有练习数据
+        practiceQuestions.value = []
+        practiceStarted.value = false
+        practiceResult.value = null
+        currentQuestionIndex.value = 0
+        userAnswers.value = []
+        remainingTime.value = 0
+        selectedExam.value = null
+        currentPracticeId.value = null
+        codeResults.value = {}
+        
+        // 停止计时器
+        stopTimer()
+        
+        // 清除本地存储
+        clearPracticeStorage()
+        
+        ElMessage.success('练习已清除')
+      } catch (error) {
+        if (error !== 'cancel') {
+          console.error('清除练习失败:', error)
+        }
       }
     }
     
@@ -1166,6 +1550,9 @@ export default {
     let statusCheckInterval = null
     
     const startStatusCheck = () => {
+      // 暂时禁用自动状态检查，避免频繁请求
+      console.log('状态检查已禁用')
+      /*
       if (statusCheckInterval) {
         clearInterval(statusCheckInterval)
       }
@@ -1173,6 +1560,7 @@ export default {
       statusCheckInterval = setInterval(() => {
         checkAnalysisStatus()
       }, 5000) // 每5秒检查一次
+      */
     }
     
     const stopStatusCheck = () => {
@@ -1444,6 +1832,9 @@ export default {
         // 设置考试时间
         practiceForm.timeLimit = examDetails.duration || exam.duration || 30
         
+        // 保存到本地存储
+        savePracticeToStorage()
+        
         ElMessage.success(`开始考试：${exam.name}，共${practiceQuestions.value.length}道题`)
         
         // 自动跳转到练习模块
@@ -1494,6 +1885,9 @@ export default {
         
         ElMessage.success(`预览考试：${exam.name}，共${practiceQuestions.value.length}道题`)
         
+        // 保存到本地存储
+        savePracticeToStorage()
+        
         // 自动滚动到练习题目区域
         setTimeout(() => {
           const questionsSection = document.getElementById('questions-section')
@@ -1518,6 +1912,16 @@ export default {
     // 页面挂载时获取数据
     onMounted(() => {
       console.log('页面挂载，课程信息:', courseInfo)
+      
+      // 先尝试从本地存储恢复练习数据
+      const restored = loadPracticeFromStorage()
+      
+      if (restored && practiceQuestions.value.length > 0) {
+        console.log('✅ 已从本地存储恢复练习数据')
+        ElMessage.info('已恢复您上次的练习进度')
+      }
+      
+      // 获取教师发布的考试
       if (courseInfo.courseId) {
         fetchTeacherExams()
       }
@@ -1527,6 +1931,7 @@ export default {
     onUnmounted(() => {
       stopTimer()
       stopStatusCheck()
+      // 注意：不在这里清除localStorage，以便用户返回时可以恢复
     })
     
     return {
@@ -1552,6 +1957,7 @@ export default {
       practiceResult,
       remainingTime,
       canGenerate,
+      totalQuestionCount,
       currentQuestion,
       timerProgress,
       generatePractice,
@@ -1576,7 +1982,12 @@ export default {
       currentReport,
       generateReport,
       closeReportDialog,
-      formatAnalysis
+      formatAnalysis,
+      // 新增：本地存储相关
+      savePracticeToStorage,
+      loadPracticeFromStorage,
+      clearPracticeStorage,
+      confirmClearPractice
     }
   }
 }
@@ -1802,6 +2213,22 @@ export default {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+.header-title .el-tag {
+  animation: fade-in 0.5s ease-in-out;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .questions-header h3 {
@@ -2398,5 +2825,100 @@ export default {
 
 .ai-analysis-status .el-button {
   margin-left: 10px;
+}
+
+/* 需要AI分析的提示样式 */
+.need-ai-tip {
+  margin-top: 15px;
+  padding: 12px 15px;
+  background: linear-gradient(135deg, #fff5e6 0%, #ffe8cc 100%);
+  border: 1px dashed #e6a23c;
+  border-radius: 8px;
+  text-align: center;
+  animation: gentle-pulse 2s ease-in-out infinite;
+}
+
+.need-ai-tip .el-tag {
+  font-size: 13px;
+  padding: 8px 15px;
+  background: white;
+  border: 1px solid #e6a23c;
+}
+
+.need-ai-tip i {
+  margin-right: 5px;
+  font-weight: bold;
+}
+
+/* AI已生成的提示样式 */
+.ai-generated-tip {
+  margin-top: 15px;
+  padding: 12px 15px;
+  background: linear-gradient(135deg, #f0f9ff 0%, #e1f3f8 100%);
+  border: 1px solid #67c23a;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.ai-generated-tip .el-tag {
+  font-size: 13px;
+  padding: 8px 15px;
+  background: white;
+  border: 1px solid #67c23a;
+}
+
+.ai-generated-tip i {
+  margin-right: 5px;
+  font-weight: bold;
+}
+
+@keyframes gentle-pulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 2px 8px rgba(230, 162, 60, 0.2);
+  }
+  50% {
+    transform: scale(1.02);
+    box-shadow: 0 4px 12px rgba(230, 162, 60, 0.3);
+  }
+}
+
+/* 优化分析按钮样式 */
+.analysis-status .el-button {
+  font-weight: 500;
+  transition: all 0.3s ease;
+}
+
+.analysis-status .el-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.3);
+}
+
+.analysis-status .el-button.is-loading {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+/* 优化Alert提示框样式 */
+.result-details .el-alert {
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.result-details .el-alert p {
+  line-height: 1.8;
+}
+
+.result-details .el-alert strong {
+  color: #409eff;
+  font-size: 15px;
 }
 </style> 
